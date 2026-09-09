@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LlamaIndex 多文件智能问答 Agent - 代码逻辑梳理</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        body {
+            font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 40px 20px;
+            line-height: 1.6;
+        }
+        h1 { color: #333; border-bottom: 2px solid #4a90d9; padding-bottom: 10px; }
+        h2 { color: #4a90d9; margin-top: 40px; }
+        h3 { color: #555; margin-top: 24px; }
+        .mermaid { background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; }
+        .code-block { background: #f4f4f4; padding: 16px; border-radius: 6px; overflow-x: auto; font-size: 13px; }
+        ul { margin: 10px 0; }
+        li { margin: 6px 0; }
+    </style>
+</head>
+<body>
+    <h1>LlamaIndex 多文件智能问答 Agent - 代码逻辑梳理</h1>
+    
+    <h2>一、整体架构流程</h2>
+    <div class="mermaid">
+flowchart TB
+    subgraph Main["main() 主函数"]
+        A1[配置 LLM 和 Embedding] --> A2[加载文档并创建索引]
+        A2 --> A3[创建智能体]
+        A3 --> A4[执行查询]
+        A4 --> A5[显示召回的文档内容]
+        A5 --> A6[智能体回复]
+    end
+    
+    subgraph Setup["setup_llm_and_embedding()"]
+        B1[读取 DASHSCOPE_API_KEY] --> B2{API Key 存在?}
+        B2 -->|否| B3[抛出 ValueError]
+        B2 -->|是| B4[创建 DashScope LLM<br/>model: deepseek-v3]
+        B4 --> B5[创建 DashScope Embedding<br/>model: TEXT_EMBEDDING_V2]
+        B5 --> B6[返回 llm, embed_model]
+    end
+    
+    subgraph Load["load_documents_and_create_index()"]
+        C1{storage 目录存在?} -->|是| C2[尝试从 storage 加载索引]
+        C2 --> C3{加载成功?}
+        C3 -->|是| C4[返回已有索引]
+        C3 -->|否| C5[读取 docs 目录文档]
+        C1 -->|否| C5
+        C5 --> C6[SimpleDirectoryReader 加载]
+        C6 --> C7[VectorStoreIndex.from_documents]
+        C7 --> C8[持久化到 storage]
+        C8 --> C4
+    end
+    
+    subgraph Agent["create_agent()"]
+        D1[index.as_retriever] --> D2[index.as_query_engine]
+        D2 --> D3[定义 retrieve_documents 工具函数]
+        D3 --> D4[FunctionTool.from_defaults]
+        D4 --> D5[创建 ReActAgent]
+        D5 --> D6[返回 agent, retriever]
+    end
+    </div>
+
+    <h2>二、函数调用关系</h2>
+    <div class="mermaid">
+flowchart LR
+    main["main()"] --> setup["setup_llm_and_embedding()"]
+    main --> load["load_documents_and_create_index()"]
+    main --> create["create_agent()"]
+    
+    create --> index["VectorStoreIndex"]
+    create --> llm["LLM"]
+    
+    agent["ReActAgent"] --> retrieve_tool["retrieve_documents 工具"]
+    retrieve_tool --> query_engine["QueryEngine"]
+    query_engine --> index
+    </div>
+
+    <h2>三、核心函数详解</h2>
+    
+    <h3>3.1 setup_llm_and_embedding()</h3>
+    <p><strong>作用：</strong>配置 LLM 和 Embedding 模型，使用 DashScope 服务。</p>
+    <div class="mermaid">
+flowchart TD
+    S1[读取环境变量 DASHSCOPE_API_KEY] --> S2{API Key 有效?}
+    S2 -->|否| S3[raise ValueError]
+    S2 -->|是| S4[实例化 DashScope LLM]
+    S4 --> S5[参数: deepseek-v3, temp=0.7, top_p=0.8]
+    S5 --> S6[实例化 DashScopeEmbedding]
+    S6 --> S7[模型: TEXT_EMBEDDING_V2]
+    S7 --> S8[返回 llm, embed_model]
+    </div>
+
+    <h3>3.2 load_documents_and_create_index()</h3>
+    <p><strong>作用：</strong>加载文档并创建向量索引，支持索引缓存复用。</p>
+    <div class="mermaid">
+flowchart TD
+    L1[检查 ./storage 是否存在] --> L2{存在?}
+    L2 -->|是| L3[StorageContext.from_defaults]
+    L3 --> L4[load_index_from_storage]
+    L4 --> L5{成功?}
+    L5 -->|是| L6[返回已加载的 index]
+    L5 -->|否| L7[捕获异常，继续创建]
+    
+    L2 -->|否| L8[检查 ./docs 目录]
+    L7 --> L8
+    L8 --> L9{docs 存在?}
+    L9 -->|否| L10[返回 None]
+    L9 -->|是| L11[SimpleDirectoryReader.load_data]
+    L11 --> L12[VectorStoreIndex.from_documents]
+    L12 --> L13[index.storage_context.persist]
+    L13 --> L6
+    </div>
+
+    <h3>3.3 create_agent()</h3>
+    <p><strong>作用：</strong>基于索引创建 ReAct 智能体及检索工具。</p>
+    <div class="mermaid">
+flowchart TD
+    A1[index] --> A2[as_retriever similarity_top_k=5]
+    A1 --> A3[as_query_engine similarity_top_k=5]
+    
+    A3 --> A4[retrieve_documents 函数]
+    A4 --> A5[内部调用 query_engine.query]
+    A5 --> A6[FunctionTool.from_defaults]
+    
+    A6 --> A7[ReActAgent]
+    A7 --> A8[tools: retrieve_tool]
+    A7 --> A9[llm]
+    A7 --> A10[system_prompt: 助手角色说明]
+    
+    A7 --> A11[返回 agent, retriever]
+    </div>
+
+    <h3>3.4 main() 执行流程</h3>
+    <div class="mermaid">
+sequenceDiagram
+    participant User
+    participant Main
+    participant Setup
+    participant Load
+    participant CreateAgent
+    participant Retriever
+    participant Agent
+
+    User->>Main: 启动程序
+    Main->>Setup: 配置 LLM/Embedding
+    Setup-->>Main: llm, embed_model
+    Main->>Main: Settings.llm, Settings.embed_model
+    Main->>Load: 加载/创建索引
+    Load-->>Main: index
+    Main->>CreateAgent: 创建智能体
+    CreateAgent-->>Main: agent, retriever
+    
+    Main->>Retriever: retriever.retrieve(query)
+    Retriever-->>Main: 召回的文档节点
+    Main->>Main: 打印召回内容
+    
+    Main->>Agent: agent.run(query)
+    Note over Agent: ReAct 推理: Think -> Action -> Observe
+    Agent->>Agent: 调用 retrieve_documents
+    Agent->>Agent: 基于检索结果生成回复
+    Agent-->>Main: response
+    Main-->>User: 输出智能体回复
+    </div>
+
+    <h2>四、关键组件说明</h2>
+    <table border="1" cellpadding="10" cellspacing="0" style="border-collapse: collapse; width: 100%;">
+        <tr style="background: #f0f0f0;">
+            <th>组件</th>
+            <th>说明</th>
+        </tr>
+        <tr>
+            <td>VectorStoreIndex</td>
+            <td>向量索引，将文档切分并向量化存储，支持相似度检索</td>
+        </tr>
+        <tr>
+            <td>ReActAgent</td>
+            <td>推理-行动智能体，按 Think -> Action -> Observe 循环决策</td>
+        </tr>
+        <tr>
+            <td>retrieve_documents</td>
+            <td>工具函数，封装 query_engine.query，供 Agent 调用检索文档</td>
+        </tr>
+        <tr>
+            <td>retriever</td>
+            <td>检索器，返回 top-k 相似节点，用于调试展示召回内容</td>
+        </tr>
+        <tr>
+            <td>query_engine</td>
+            <td>查询引擎，检索 + LLM 生成，返回完整回答</td>
+        </tr>
+    </table>
+
+    <h2>五、数据流向</h2>
+    <div class="mermaid">
+flowchart LR
+    subgraph Input
+        docs["docs/*.txt"]
+        query["用户查询"]
+    end
+    
+    subgraph Process
+        reader["SimpleDirectoryReader"]
+        index["VectorStoreIndex"]
+        agent["ReActAgent"]
+        tool["retrieve_documents"]
+        qe["QueryEngine"]
+    end
+    
+    subgraph Output
+        nodes["召回的节点"]
+        answer["最终回答"]
+    end
+    
+    docs --> reader
+    reader --> index
+    query --> agent
+    agent --> tool
+    tool --> qe
+    qe --> index
+    index --> nodes
+    qe --> answer
+    </div>
+
+    <script>
+        mermaid.initialize({ startOnLoad: true, theme: 'default' });
+    </script>
+</body>
+</html>

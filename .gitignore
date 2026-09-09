@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+combined_storage/
+langchain_storage/
+reports/
+storage/
+workspace/
